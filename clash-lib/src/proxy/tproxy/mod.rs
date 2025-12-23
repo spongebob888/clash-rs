@@ -161,6 +161,14 @@ fn bind_nonlocal_socket(src_addr: SocketAddr) -> io::Result<UdpSocket> {
     } else {
         set_ip_transparent_v6(&socket)?;
     }
+    // Set reuse addr and port to avoid bind failure
+    // TProxy must bind to a nonlocal address which is the proxy destination.
+    // However, this port may be used by other processes in this machine leading
+    // to address already in use error.
+    // This can also be found in shadowsocks-rust
+    // https://github.com/shadowsocks/shadowsocks-rust/blob/380db70ea7fe52b933c35e36c4c527a12c973102/crates/shadowsocks-service/src/local/redir/udprelay/sys/unix/linux.rs#L74
+    socket.set_reuse_port(true)?;
+
     socket.set_nonblocking(true)?;
     socket.set_reuse_address(true)?;
     socket.bind(&src_addr.into())?;
