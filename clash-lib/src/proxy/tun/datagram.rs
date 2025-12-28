@@ -1,7 +1,11 @@
 use crate::{
+    Error,
     app::{
         dispatcher::Dispatcher,
-        dns::{ThreadSafeDNSResolver, exchange_with_resolver},
+        dns::{
+            ThreadSafeDNSResolver, exchange_with_resolver,
+            hijack::hijack_dns_packet, resolver,
+        },
         net::DEFAULT_OUTBOUND_INTERFACE,
     },
     common::errors::new_io_error,
@@ -23,7 +27,7 @@ pub(crate) async fn handle_inbound_datagram(
     // lr: app packets went into tun will be accessed from lr
     // ls: packet written into ls will go back to app from tun
     let (mut lr, mut ls) = socket.split();
-    let mut ls_dns = ls.clone(); // for dns hijack
+    let ls_dns = ls.clone(); // for dns hijack
     let resolver_dns = resolver.clone(); // for dns hijack
 
     // dispatcher <-> tun communications
@@ -96,73 +100,13 @@ pub(crate) async fn handle_inbound_datagram(
             if dns_hijack && pkt.dst_addr.port() == 53 {
                 trace!("got dns packet: {:?}, returning from Clash DNS server", pkt);
 
-                match hickory_proto::op::Message::from_vec(&pkt.data) {
-                    Ok(msg) => {
-                        let mut send_response =
-                            async |msg: hickory_proto::op::Message,
-                                   pkt: &UdpPacket| {
-                                match msg.to_vec() {
-                                    Ok(data) => {
-                                        if let Err(e) = ls_dns
-                                            .send(
-                                                (
-                                                    data,
-                                                    pkt.dst_addr
-                                                        .clone()
-                                                        .must_into_socket_addr(),
-                                                    pkt.src_addr
-                                                        .clone()
-                                                        .must_into_socket_addr(),
-                                                )
-                                                    .into(),
-                                            )
-                                            .await
-                                        {
-                                            warn!(
-                                                "failed to send udp packet to \
-                                                 netstack: {}",
-                                                e
-                                            );
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            "failed to serialize dns response: {}",
-                                            e
-                                        );
-                                    }
-                                }
-                            };
-
-                        trace!("hijack dns request: {:?}", msg);
-
-                        let mut resp =
-                            match exchange_with_resolver(&resolver_dns, &msg, true)
-                                .await
-                            {
-                                Ok(resp) => resp,
-                                Err(e) => {
-                                    warn!("failed to exchange dns message: {}", e);
-                                    continue 'read_packet;
-                                }
-                            };
-
-                        // TODO: figure out where the message id got lost
-                        resp.set_id(msg.id());
-                        trace!("hijack dns response: {:?}", resp);
-
-                        send_response(resp, &pkt).await;
-                    }
-                    Err(e) => {
-                        warn!(
-                            "failed to parse dns packet: {}, putting it back to \
-                             stack",
-                            e
-                        );
-                    }
-                };
-
-                // don't forward dns packet to dispatcher
+                let mut ls_dns_clone = ls_dns.clone();
+                // using spawn to avoid blocking the main loop
+                tokio::spawn(hijack_dns_packet(
+                    resolver_dns.clone(),
+                    pkt,
+                    |data| async move { ls_dns_clone.send(data).await },
+                ));
                 continue 'read_packet;
             }
 

@@ -14,6 +14,7 @@ mod dns_client;
 mod fakeip;
 mod filters;
 mod helper;
+pub mod hijack;
 pub mod resolver;
 mod runtime;
 mod server;
